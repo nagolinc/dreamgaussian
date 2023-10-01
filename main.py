@@ -156,6 +156,77 @@ class GUI:
             if self.enable_zero123:
                 self.guidance_zero123.get_img_embeds(self.input_img_torch)
 
+
+    def get_fatness(self, gaussians, cam_matrix):
+        # Project Gaussian centers to the camera coordinate system
+        projected_centers = torch.matmul(gaussians.get_xyz, cam_matrix[:3, :3].T) + cam_matrix[:3, 3]
+        
+        # Compute the location in the dimension the camera is facing (z-axis in camera coordinate system)
+        z_locations = projected_centers[:, 2]
+        
+        # Compute the standard deviation in this dimension
+        std_dev = torch.std(z_locations)
+        
+        return std_dev
+    
+    def get_column_fatness(self,gaussians, cam_matrix, grid_size=16):
+        # Get Gaussian centers and transform to camera coordinate system
+        xyzs = gaussians.get_xyz
+        transformed_xyzs = torch.matmul(xyzs, cam_matrix[:3, :3].T) + cam_matrix[:3, 3]
+        mask = ~torch.isnan(transformed_xyzs).any(dim=1)
+        transformed_xyzs = transformed_xyzs[mask]
+
+        # Create a grid based on x-y coordinates
+        min_x = torch.min(transformed_xyzs[:, 0])
+        max_x = torch.max(transformed_xyzs[:, 0])
+        min_y = torch.min(transformed_xyzs[:, 1])
+        max_y = torch.max(transformed_xyzs[:, 1])
+        x_linspace = torch.linspace(min_x.item(), max_x.item(), grid_size)
+        y_linspace = torch.linspace(min_y.item(), max_y.item(), grid_size)
+
+        grid_x, grid_y = torch.meshgrid(x_linspace, y_linspace)
+
+        fatness_scores = []
+        total_gaussians = 0
+
+        # Loop through each cell in the grid
+        for i in range(grid_size - 1):
+            for j in range(grid_size - 1):
+                # Define the boundaries of the current cell
+                #x_min, x_max = grid_x[i, j], grid_x[i+1, j]
+                #y_min, y_max = grid_y[i, j], grid_y[i, j+1]
+                x_min, x_max = x_linspace[i], x_linspace[i+1]
+                y_min, y_max = y_linspace[j], y_linspace[j+1]
+
+
+                # Find the Gaussians that fall into the current cell
+                mask = (transformed_xyzs[:, 0] >= x_min) & (transformed_xyzs[:, 0] <= x_max) & \
+                    (transformed_xyzs[:, 1] >= y_min) & (transformed_xyzs[:, 1] <= y_max)
+
+                # Compute the fatness (std deviation) of the z-values of the Gaussians in this cell
+                num_gaussians = mask.sum().item()
+
+                #print(i,j,num_gaussians)
+
+                if num_gaussians > 1:
+                    column_z_values = transformed_xyzs[mask, 2]
+                    column_fatness = torch.std(column_z_values)
+                    fatness_scores.append(column_fatness * num_gaussians)
+                    total_gaussians += num_gaussians
+
+        print("tg",total_gaussians)
+
+        
+
+        # Compute the weighted mean fatness score
+        if fatness_scores:
+            weighted_mean_fatness = torch.sum(torch.stack(fatness_scores)) / total_gaussians
+        else:
+            weighted_mean_fatness = torch.tensor(0.0)
+
+        return weighted_mean_fatness
+
+
     def train_step(self):
         starter = torch.cuda.Event(enable_timing=True)
         ender = torch.cuda.Event(enable_timing=True)
@@ -232,6 +303,12 @@ class GUI:
 
             if self.enable_zero123:
                 loss = loss + self.opt.lambda_zero123 * self.guidance_zero123.train_step(images, vers, hors, radii, step_ratio)
+
+            # fatness
+            #fatness_score = self.get_fatness(self.renderer.gaussians, self.fixed_cam.world_view_transform)
+            fatness_score = self.get_column_fatness(self.renderer.gaussians, self.fixed_cam.world_view_transform)
+            if hasattr(self.opt, 'lambda_fatness') and hasattr(self.opt, 'ideal_fatness'):                
+                loss = loss + self.opt.lambda_fatness * (fatness_score - self.opt.ideal_fatness).abs()
             
             # optimize step
             loss.backward()
@@ -261,7 +338,7 @@ class GUI:
             dpg.set_value("_log_train_time", f"{t:.4f}ms")
             dpg.set_value(
                 "_log_train_log",
-                f"step = {self.step: 5d} (+{self.train_steps: 2d}) loss = {loss.item():.4f}",
+                f"step = {self.step: 5d} (+{self.train_steps: 2d}) loss = {loss.item():.4f}, fatness = {fatness_score:.4f}",
             )
 
         # dynamic train steps (no need for now)
@@ -648,6 +725,14 @@ class GUI:
                     user_data="negative_prompt",
                 )
 
+                #fatness inputs
+                def callback_set_opt_attr(sender, app_data, user_data):
+                    setattr(self.opt, user_data, app_data)
+
+                dpg.add_input_float(label="lambda_fatness", default_value=self.opt.lambda_fatness, callback=callback_set_opt_attr, user_data="lambda_fatness")
+                dpg.add_input_float(label="ideal_fatness", default_value=self.opt.ideal_fatness, callback=callback_set_opt_attr, user_data="ideal_fatness")
+
+
                 # save current model
                 with dpg.group(horizontal=True):
                     dpg.add_text("Save: ")
@@ -709,6 +794,18 @@ class GUI:
                     dpg.add_button(
                         label="start", tag="_button_train", callback=callback_train
                     )
+
+                    #restart 
+                    def callback_restart(sender, app_data):
+                        self.renderer.initialize(num_pts=self.opt.num_pts)
+                        self.prepare_train()
+                        self.training = False
+                        dpg.configure_item("_button_train", label="start")
+
+                    dpg.add_button(label="restart", callback=callback_restart)
+
+
+
                     dpg.bind_item_theme("_button_train", theme_button)
 
                 with dpg.group(horizontal=True):

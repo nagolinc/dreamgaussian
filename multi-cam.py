@@ -16,6 +16,12 @@ from gs_renderer import Renderer, MiniCam
 from grid_put import mipmap_linear_grid_put_2d
 from mesh import Mesh, safe_normalize
 
+import math
+
+import pickle
+def read_pickle(file_path):
+    with open(file_path, 'rb') as f:
+        return pickle.load(f)
 
 class GUI:
     def __init__(self, opt):
@@ -54,12 +60,14 @@ class GUI:
         self.overlay_input_img = False
         self.overlay_input_img_ratio = 0.5
 
+        '''
         # depth map
         self.input_depth_map_torch = None  # New variable to hold the depth-map tensor
         self.input_depth_map = None
         # Load depth-map if provided
         if opt.depth_map is not None:
             self.input_depth_map = self.load_depth_map(opt.depth_map)
+        '''
 
         # input text
         self.prompt = ""
@@ -132,6 +140,44 @@ class GUI:
             self.cam.far,
         )
 
+
+        #load camera data from poses file
+        # Reading camera data
+        K, azs, _, _, poses = read_pickle(self.opt.camerasFile)
+
+        # If the length of azs and poses match, you can iterate over them to create multiple cameras
+        cameras = []
+        for i,(az, pose) in enumerate(zip(azs, poses)):
+            angle = 2*math.pi*i/360
+            pose = orbit_camera(self.opt.elevation, angle, self.opt.radius)
+            cameras.append(MiniCam(
+                pose,
+                self.opt.ref_size,
+                self.opt.ref_size,
+                self.cam.fovy,
+                self.cam.fovx,
+                self.cam.near,
+                self.cam.far,
+            ))
+
+        self.cameras = cameras
+
+        #load images from images file
+        multiImages, multiMasks = self.load_multi_image(self.opt.imagesFile)
+        self.multiImages = multiImages
+        self.multiMasks = multiMasks
+
+        #convert to torch
+        self.multiImagesTorch = []
+        self.multiMasksTorch = []
+        for i in range(16):
+            self.multiImagesTorch.append(torch.from_numpy(self.multiImages[i]).permute(2, 0, 1).unsqueeze(0).to(self.device))
+            self.multiMasksTorch.append(torch.from_numpy(self.multiMasks[i]).permute(2, 0, 1).unsqueeze(0).to(self.device))
+            #reize to ref_size
+            self.multiImagesTorch[i] = F.interpolate(self.multiImagesTorch[i], (self.opt.ref_size, self.opt.ref_size), mode="bilinear", align_corners=False)
+            self.multiMasksTorch[i] = F.interpolate(self.multiMasksTorch[i], (self.opt.ref_size, self.opt.ref_size), mode="bilinear", align_corners=False)
+
+
         self.enable_sd = self.opt.lambda_sd > 0 and self.prompt != ""
         self.enable_zero123 = self.opt.lambda_zero123 > 0 and self.input_img is not None
 
@@ -160,6 +206,7 @@ class GUI:
             self.input_mask_torch = F.interpolate(self.input_mask_torch, (
                 self.opt.ref_size, self.opt.ref_size), mode="bilinear", align_corners=False)
 
+        '''
         # depth map
         if self.input_depth_map is not None:
             print("Setting up depth map")
@@ -170,6 +217,7 @@ class GUI:
         else:
             print("No depth map provided",
                   self.opt.depth_map, self.input_depth_map)
+        '''
 
         # prepare embeddings
         with torch.no_grad():
@@ -273,14 +321,38 @@ class GUI:
 
                 # rgb loss
                 image = out["image"].unsqueeze(0)  # [1, 3, H, W] in [0, 1]
-                loss = loss + 10000 * step_ratio * \
+                loss = loss + self.opt.known_view_weight * step_ratio * \
                     F.mse_loss(image, self.input_img_torch)
 
                 # mask loss
                 mask = out["alpha"].unsqueeze(0)  # [1, 1, H, W] in [0, 1]
-                loss = loss + 1000 * step_ratio * \
+                loss = loss + self.opt.known_view_mask_weight * step_ratio * \
                     F.mse_loss(mask, self.input_mask_torch)
+                
 
+            #multi-view
+            for i in range(16):
+                cur_cam = self.cameras[i]
+                out = self.renderer.render(cur_cam)
+
+                # rgb loss
+                image = self.multiImagesTorch[i]
+
+                #print('about to die 0',image)
+
+                loss = loss + self.opt.mv_weight * step_ratio * \
+                    F.mse_loss(image, self.multiImagesTorch[i])
+                
+                # mask loss
+                mask = self.multiMasksTorch[i]
+
+                #print('about to die 1',mask)
+
+                loss = loss + self.opt.mv_mask_weight * step_ratio * \
+                    F.mse_loss(mask, self.multiMasksTorch[i])
+
+
+            '''
             # Depth map loss
             depth_loss = 0
             if self.input_depth_map_torch is not None and self.input_mask_torch is not None:
@@ -321,6 +393,8 @@ class GUI:
             else:
                 # print("huh",self.input_depth_map_torch,self.input_mask_torch)
                 pass
+                
+            '''
 
             # novel view (manual batch)
             render_resolution = 128 if step_ratio < 0.3 else (
@@ -379,6 +453,8 @@ class GUI:
                     self.guidance_zero123.train_step(
                         images, vers, hors, radii, step_ratio)
 
+
+            '''
             # fatness
             fatness_score = self.get_fatness(
                 self.renderer.gaussians, self.fixed_cam.world_view_transform)
@@ -386,6 +462,7 @@ class GUI:
             if hasattr(self.opt, 'lambda_fatness') and hasattr(self.opt, 'ideal_fatness'):
                 loss = loss + self.opt.lambda_fatness * \
                     (fatness_score - self.opt.ideal_fatness).abs()
+            '''
 
             # optimize step
             loss.backward()
@@ -419,7 +496,7 @@ class GUI:
             dpg.set_value("_log_train_time", f"{t:.4f}ms")
             dpg.set_value(
                 "_log_train_log",
-                f"step = {self.step: 5d} (+{self.train_steps: 2d}) loss = {loss.item():.4f}, fatness = {fatness_score:.4f}, depth_loss = {depth_loss:.4f}",
+                f"step = {self.step: 5d} (+{self.train_steps: 2d}) loss = {loss.item():.4f}",
             )
 
         # dynamic train steps (no need for now)
@@ -524,6 +601,43 @@ class GUI:
             with open(file_prompt, "r") as f:
                 self.prompt = f.read().strip()
 
+    #this function loads an image that is size 256x(256*16) and breaks it into 16 images of size 256x256
+    def load_multi_image(self, file):
+        #load image
+        print(f'[INFO] load image from {file}...')
+        img = cv2.imread(file, cv2.IMREAD_UNCHANGED)
+
+        #print("huh?",img)
+
+        #break into 16 images
+        imgs=[]
+        for i in range(16):
+            imgs.append(img[:,i*256:(i+1)*256,:])
+
+        #remove backgrouns for each img
+        for i in range(16):
+            if imgs[i].shape[-1] == 3:
+                if self.bg_remover is None:
+                    self.bg_remover = rembg.new_session()
+                imgs[i] = rembg.remove(imgs[i], session=self.bg_remover)
+
+            #resize each image
+            imgs[i] = cv2.resize(imgs[i], (self.W, self.H), interpolation=cv2.INTER_AREA)
+            imgs[i] = imgs[i].astype(np.float32) / 255.0
+
+            #print("huh?",i,imgs[i])
+
+        masks=[]
+        for i in range(16):
+            masks.append(imgs[i][..., 3:])
+            # white bg
+            imgs[i] = imgs[i][..., :3] * masks[i] + (1 - masks[i])
+            # bgr to rgb
+            imgs[i] = imgs[i][..., ::-1].copy()
+
+        return imgs, masks
+
+
     def load_depth_map(self, file):
         print(f'[INFO] load depth map from {file}...')
         depth_map = cv2.imread(file, cv2.IMREAD_UNCHANGED)
@@ -540,6 +654,9 @@ class GUI:
         print("depth_map", self.input_depth_map)
 
         return self.input_depth_map
+    
+
+
 
     @torch.no_grad()
     def save_model(self, mode='geo', texture_size=1024):
@@ -840,7 +957,8 @@ class GUI:
                     user_data="negative_prompt",
                 )
 
-                # fatness inputs
+                
+                #set opt
                 def callback_set_opt_attr(sender, app_data, user_data):
                     setattr(self.opt, user_data, app_data)
 
@@ -849,12 +967,15 @@ class GUI:
                                     callback=callback_set_opt_attr, user_data="elevation")
 
 
+                '''
                 # Add input boxes for fatness parameters
                 dpg.add_input_float(label="lambda_fatness", default_value=self.opt.lambda_fatness,
                                     callback=callback_set_opt_attr, user_data="lambda_fatness")
                 dpg.add_input_float(label="ideal_fatness", default_value=self.opt.ideal_fatness,
                                     callback=callback_set_opt_attr, user_data="ideal_fatness")
+                '''    
 
+                '''
                 # depth map
                 if self.opt.depth_map is not None:
                     # Add input boxes for depth parameters
@@ -864,6 +985,7 @@ class GUI:
                                         callback=callback_set_opt_attr, user_data="depth_scale")
                     dpg.add_input_float(label="depth_weight", default_value=self.opt.depth_weight,
                                         callback=callback_set_opt_attr, user_data="depth_weight")
+                '''
 
                 # save current model
                 with dpg.group(horizontal=True):

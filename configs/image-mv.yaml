@@ -2,7 +2,7 @@
 # input rgba image path (default to None, can be load in GUI too)
 input: 
 # input text prompt (default to None, can be input in GUI too)
-prompt: an occult emblem from an alien world, with symbols from alchemy, and latin words of great mystery.  Beautiful aesthetic result, 3d render, unreal engine, marvel movie graphics. Give it a sort of eldrich horror touch with a few tentacles and eyeballs.  Regions that are dark black should be seething with deep purples and reds.  There should be a wide variety of strange symbols, glyphs and shilouettes of cosmic personas.  
+prompt:
 # input mesh for stage 2 (auto-search from stage 1 output path if None)
 mesh:
 # estimated elevation angle for input image 
@@ -36,9 +36,16 @@ load:
 train_geo: False
 # prob to invert background color during training (0 = always black, 1 = always white)
 invert_bg_prob: 0.5
-#fatness
-lambda_fatness: 4000
-ideal_fatness: 0.0
+
+###multiview-diffusion-guidance
+mv_weight: 1000
+mv_mask_weight: 100
+
+known_view_weight: 2000
+known_view_mask_weight: 200
+
+#known_view_weight: 0
+#known_view_mask_weight: 0
 
 
 ### GUI
@@ -49,8 +56,8 @@ H: 800
 W: 800
 
 ### Gaussian splatting
-num_pts: 50000
-sh_degree: 3
+num_pts: 5000
+sh_degree: 0
 position_lr_init: 0.001
 position_lr_final: 0.00002
 position_lr_delay_mult: 0.02

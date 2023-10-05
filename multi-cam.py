@@ -143,13 +143,18 @@ class GUI:
 
         #load camera data from poses file
         # Reading camera data
-        K, azs, _, _, poses = read_pickle(self.opt.camerasFile)
+        K, azimuths, elevations, distances, cam_poses = read_pickle(self.opt.camerasFile)
 
         # If the length of azs and poses match, you can iterate over them to create multiple cameras
         cameras = []
-        for i,(az, pose) in enumerate(zip(azs, poses)):
-            angle = 2*math.pi*i/360
-            pose = orbit_camera(self.opt.elevation, angle, self.opt.radius)
+        for i,(az, pose) in enumerate(zip(azimuths, cam_poses)):
+            #angle = 2*math.pi*i/360
+            angle=azimuths[i]
+            #mv_camera_elevation=2*math.pi*30/360
+            mv_camera_elevation=elevations[i]
+            #radius=distances[i]
+            radius=self.opt.radius
+            pose = orbit_camera(mv_camera_elevation, angle, radius)
             cameras.append(MiniCam(
                 pose,
                 self.opt.ref_size,
@@ -321,13 +326,19 @@ class GUI:
 
                 # rgb loss
                 image = out["image"].unsqueeze(0)  # [1, 3, H, W] in [0, 1]
-                loss = loss + self.opt.known_view_weight * step_ratio * \
+                img_loss = self.opt.known_view_weight * step_ratio * \
                     F.mse_loss(image, self.input_img_torch)
+                
+                loss = loss + img_loss
 
                 # mask loss
                 mask = out["alpha"].unsqueeze(0)  # [1, 1, H, W] in [0, 1]
-                loss = loss + self.opt.known_view_mask_weight * step_ratio * \
+                mask_loss = self.opt.known_view_mask_weight * step_ratio * \
                     F.mse_loss(mask, self.input_mask_torch)
+                
+                loss = loss + mask_loss
+                
+                #print('known view', img_loss, mask_loss)
                 
 
             #multi-view
@@ -336,20 +347,26 @@ class GUI:
                 out = self.renderer.render(cur_cam)
 
                 # rgb loss
-                image = self.multiImagesTorch[i]
+                image = out["image"].unsqueeze(0)  # [1, 3, H, W] in [0, 1]
 
                 #print('about to die 0',image)
 
-                loss = loss + self.opt.mv_weight * step_ratio * \
+                img_loss = self.opt.mv_weight * step_ratio * \
                     F.mse_loss(image, self.multiImagesTorch[i])
                 
+                loss = loss + img_loss
+                
                 # mask loss
-                mask = self.multiMasksTorch[i]
+                mask = out["alpha"].unsqueeze(0)  # [1, 1, H, W] in [0, 1]
 
                 #print('about to die 1',mask)
 
-                loss = loss + self.opt.mv_mask_weight * step_ratio * \
+                mask_loss= self.opt.mv_mask_weight * step_ratio * \
                     F.mse_loss(mask, self.multiMasksTorch[i])
+                
+                #print(i, img_loss, mask_loss)
+                
+                loss = loss + mask_loss
 
 
             '''
